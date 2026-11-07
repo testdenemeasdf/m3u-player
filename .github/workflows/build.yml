@@ -1,0 +1,107 @@
+name: APK derle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Depoyu al
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # index.html ve listeler uygulamanın içine gömülür
+      - name: Web dosyalarını hazırla
+        run: |
+          mkdir -p www
+          cp index.html www/
+          for f in *.m3u *.m3u8 listeler.txt listeler.json playlists.json; do
+            [ -f "$f" ] && cp "$f" www/ || true
+          done
+          ls -la www
+
+      - name: Capacitor kur
+        run: |
+          npm init -y
+          npm i @capacitor/core @capacitor/cli @capacitor/android
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.m3uplayer.app",
+            "appName": "M3U Player",
+            "webDir": "www",
+            "server": { "androidScheme": "http", "cleartext": true },
+            "android": { "allowMixedContent": true }
+          }
+          EOF
+          npx cap add android
+          npx cap sync android
+
+      # Android TV ana ekranı için 320x180 banner (harici bağımlılık yok)
+      - name: TV banner üret
+        run: |
+          mkdir -p android/app/src/main/res/drawable-xhdpi
+          python3 - <<'PY'
+          import zlib, struct, math
+          W, H = 320, 180
+          raw = bytearray()
+          for y in range(H):
+              raw.append(0)
+              t = y / H
+              bg = (int(22 - 17 * t), int(37 - 29 * t), int(74 - 58 * t))
+              for x in range(W):
+                  c = bg
+                  d = math.hypot(x - 160, y - 90)
+                  if 54 <= d <= 62:
+                      c = (47, 129, 247)
+                  if 140 <= x <= 188 and abs(y - 90) <= 30 * (188 - x) / 48:
+                      c = (255, 255, 255)
+                  raw += bytes(c)
+          def chunk(k, d):
+              b = k + d
+              return struct.pack(">I", len(d)) + b + struct.pack(">I", zlib.crc32(b) & 0xffffffff)
+          png = (b"\x89PNG\r\n\x1a\n"
+                 + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+                 + chunk(b"IEND", b""))
+          open("android/app/src/main/res/drawable-xhdpi/banner.png", "wb").write(png)
+          PY
+
+      # http yayınlara izin ver + Android TV'de başlatıcıda görün
+      - name: Manifest düzenle
+        run: |
+          python3 - <<'PY'
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          s = s.replace("<application", '<application android:usesCleartextTraffic="true" android:banner="@drawable/banner"', 1)
+          s = s.replace(
+              '<category android:name="android.intent.category.LAUNCHER" />',
+              '<category android:name="android.intent.category.LAUNCHER" />\n'
+              '                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />', 1)
+          s = s.replace("<application",
+              '<uses-feature android:name="android.software.leanback" android:required="false" />\n'
+              '    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n'
+              '    <application', 1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+          cat android/app/src/main/AndroidManifest.xml
+
+      - name: APK derle
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: APK'yı yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3u-player-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
